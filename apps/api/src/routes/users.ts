@@ -21,11 +21,11 @@ import {
   normalizePhoneNumber,
   verifyOtpWithBruteForceProtection,
 } from "../services/phone";
-import { authenticate } from "../middleware/authenticate";
+import { authenticate, optionalAuth } from "../middleware/authenticate";
 import { requireActiveUser } from "../middleware/require-active-user";
 import { createError } from "../middleware/error";
 import { redis } from "../lib/redis";
-import { apiLimiter, phoneRateLimit } from "../middleware/rate-limit";
+import { apiLimiter, phoneRateLimit, reportLimiter } from "../middleware/rate-limit";
 import { getBadgesForUser } from "../services/badges";
 import { config } from "../lib/config";
 import { getSessionHistory, type HistoryStatusFilter } from "../db/queries/sessions";
@@ -35,6 +35,35 @@ import { tokenRevocationKey, tokenTtlSeconds } from "../middleware/authenticate"
 import { logger } from "../lib/logger";
 
 const router: Router = Router();
+
+const UserReportSchema = z.object({
+  reason: z.enum(["harassment", "spam", "impersonation", "other"]),
+  details: z.string().trim().max(1000).optional(),
+}).strict();
+
+router.post("/:id/report", authenticate, reportLimiter, async (req, res) => {
+  const body = UserReportSchema.parse(req.body);
+  if (req.params.id === req.user!.sub) throw createError("You cannot report yourself", 400);
+  const reported = await findUserById(req.params.id);
+  if (!reported) throw createError("User not found", 404);
+  await query(
+    `INSERT INTO user_reports (reporter_id, reported_id, reason, details)
+     VALUES ($1, $2, $3, $4)`,
+    [req.user!.sub, req.params.id, body.reason, body.details ?? null]
+  );
+  res.status(201).json({ reported: true });
+});
+
+router.post("/:id/block", authenticate, async (req, res) => {
+  if (req.params.id === req.user!.sub) throw createError("You cannot block yourself", 400);
+  const reported = await findUserById(req.params.id);
+  if (!reported) throw createError("User not found", 404);
+  await query(
+    `INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [req.user!.sub, req.params.id]
+  );
+  res.status(201).json({ blocked: true });
+});
 
 /**
  * GET /users/me
@@ -260,7 +289,7 @@ router.post("/streaks/repair", authenticate, async (req, res) => {
  * Public profile — display name, stats. No auth required.
  * Returns a redirect field if the username has been renamed.
  */
-router.get("/profile/:username", apiLimiter, async (req, res) => {
+router.get("/profile/:username", optionalAuth, apiLimiter, async (req, res) => {
   const { username } = z.object({ username: z.string() }).parse(req.params);
 
   // Check for username redirect first
@@ -272,6 +301,14 @@ router.get("/profile/:username", apiLimiter, async (req, res) => {
 
   const user = await getUserPublicProfileByUsername(username);
   if (!user) throw createError("User not found", 404);
+
+  if (req.user?.sub) {
+    const blocked = await query(
+      "SELECT 1 FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2",
+      [req.user.sub, user.id]
+    );
+    if (blocked.rows.length > 0) throw createError("User not found", 404);
+  }
 
   const isOwner = req.user?.sub === user.id;
 
@@ -407,6 +444,7 @@ router.get("/:username/public", apiLimiter, async (req, res) => {
   });
 
   res.json({
+    userId: user.id,
     username: user.username,
     displayName: user.display_name,
     avatarUrl: user.avatar_url,

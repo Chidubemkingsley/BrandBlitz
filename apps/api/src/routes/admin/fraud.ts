@@ -7,6 +7,7 @@ import {
   getFraudFlags,
   getFraudFlagById,
   updateFraudFlagStatus,
+  getUserReports,
 } from "../../db/queries/fraud-flags";
 import { CursorQuerySchema } from "../../db/pagination";
 
@@ -34,6 +35,7 @@ const PatchBodySchema = z.object({
 router.get("/", async (req, res) => {
   const { status, cursor, limit: pageSize } = ListQuerySchema.parse(req.query);
   const { flags, nextCursor } = await getFraudFlags({ status, cursor, pageSize });
+  const reports = await getUserReports({ status, limit: pageSize });
 
   res.json({
     flags: flags.map((f) => ({
@@ -57,6 +59,16 @@ router.get("/", async (req, res) => {
       },
       sessionFlagReasons: f.session_flag_reasons,
       deviceId: f.device_id,
+    })),
+    reports: reports.map((report) => ({
+      id: report.id,
+      type: "user_report",
+      reporterId: report.reporter_id,
+      reportedId: report.reported_id,
+      reason: report.reason,
+      details: report.details,
+      status: report.status,
+      createdAt: report.created_at,
     })),
     pagination: {
       pageSize,
