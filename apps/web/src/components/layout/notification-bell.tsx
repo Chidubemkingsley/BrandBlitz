@@ -12,12 +12,14 @@ const ICONS: Record<NotificationType, string> = {
   payout_received: "💸",
   badge_earned: "🏅",
   streak_milestone: "🔥",
+  rank_overtaken: "📉",
 };
 
 const TYPE_LABELS: Record<NotificationType, string> = {
   payout_received: "Payout received",
   badge_earned: "Badge earned",
   streak_milestone: "Streak milestone",
+  rank_overtaken: "Rank drop",
 };
 
 function notificationSummary(n: Notification): string {
@@ -33,6 +35,13 @@ function notificationSummary(n: Notification): string {
     case "streak_milestone": {
       const days = n.payload.milestone as number | undefined;
       return days ? `${days}-day streak reached` : "Streak milestone reached";
+    }
+    case "rank_overtaken": {
+      const rank = n.payload.new_rank as number | undefined;
+      const name = n.payload.challenge_name as string | undefined;
+      if (rank && name) return `You dropped to #${rank} on ${name}`;
+      if (rank) return `You dropped to rank #${rank}`;
+      return "You've been overtaken on the leaderboard";
     }
   }
 }

@@ -28,6 +28,7 @@ import { redis } from "../lib/redis";
 import { config } from "../lib/config";
 import { CursorQuerySchema } from "../db/pagination";
 import { query, pool } from "../db/index";
+import { getAllTags } from "../db/queries/challenge-tags";
 
 const router = Router();
 const CHALLENGE_DETAIL_CACHE_TTL_SECONDS = 60;
@@ -76,6 +77,7 @@ const ChallengeFilterSchema = CursorQuerySchema.extend({
   status: z.enum(["active", "upcoming", "ended"]).optional(),
   min_pool: z.coerce.number().min(0).optional(),
   end_before: z.string().datetime({ offset: true }).optional(),
+  tag: z.string().max(64).optional(),
 });
 
 /**
@@ -90,7 +92,7 @@ router.get("/", optionalAuth, async (req, res) => {
     throw createError("Invalid query parameters", 400, "INVALID_QUERY");
   }
 
-  const { brandId, limit, cursor, status, min_pool, end_before, offset } = parsed.data;
+  const { brandId, limit, cursor, status, min_pool, end_before, tag, offset } = parsed.data;
 
   // Emit deprecation header if legacy offset is used
   if (offset !== undefined) {
@@ -104,7 +106,7 @@ router.get("/", optionalAuth, async (req, res) => {
     return;
   }
 
-  const hasFilters = status !== undefined || min_pool !== undefined || end_before !== undefined;
+  const hasFilters = status !== undefined || min_pool !== undefined || end_before !== undefined || tag !== undefined;
 
   if (!hasFilters) {
     const cacheKey = `challenges:active:global:${cursor ?? "start"}:${limit}`;
@@ -121,6 +123,7 @@ router.get("/", optionalAuth, async (req, res) => {
     status,
     minPoolUsdc: min_pool,
     endBefore: end_before,
+    tagSlug: tag,
     cursor,
     limit,
   });
@@ -187,6 +190,15 @@ router.get(
     });
   },
 );
+
+/**
+ * GET /challenges/tags
+ * List all admin-curated challenge tags for use in filter chips.
+ */
+router.get("/tags", async (_req, res) => {
+  const tags = await getAllTags();
+  res.json({ tags });
+});
 
 /**
  * GET /challenges/:id

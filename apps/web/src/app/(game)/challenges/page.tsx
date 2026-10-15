@@ -15,6 +15,12 @@ const PAGE_SIZE = 20;
 
 type StatusFilter = "all" | "active" | "upcoming" | "ended";
 
+interface ChallengeTag {
+  id: string;
+  name: string;
+  slug: string;
+}
+
 function timeRemaining(endsAt: string | null): string {
   if (!endsAt) return "";
   const ms = new Date(endsAt).getTime() - Date.now();
@@ -41,12 +47,22 @@ export default function ChallengesDiscoveryPage() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [requerying, setRequerying] = useState(false);
   const [failed, setFailed] = useState(false);
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [minPool, setMinPool] = useState("");
   const [endBefore, setEndBefore] = useState("");
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+
+  const [tags, setTags] = useState<ChallengeTag[]>([]);
+
+  // Load available tags once on mount
+  useEffect(() => {
+    api
+      .get("/challenges/tags")
+      .then((res) => setTags((res.data.tags as ChallengeTag[]) ?? []))
+      .catch(() => {/* tags are non-critical */});
+  }, []);
 
   const buildParams = useCallback(
     (cursor?: string) => {
@@ -54,10 +70,11 @@ export default function ChallengesDiscoveryPage() {
       if (statusFilter !== "all") p.set("status", statusFilter);
       if (minPool) p.set("min_pool", minPool);
       if (endBefore) p.set("end_before", new Date(endBefore).toISOString());
+      if (activeTag) p.set("tag", activeTag);
       if (cursor) p.set("cursor", cursor);
       return p;
     },
-    [statusFilter, minPool, endBefore]
+    [statusFilter, minPool, endBefore, activeTag]
   );
 
   const loadPage = useCallback(
@@ -71,12 +88,8 @@ export default function ChallengesDiscoveryPage() {
     [buildParams]
   );
 
-  const loadInitial = useCallback(async (isRequery = false) => {
-    if (isRequery) {
-      setRequerying(true);
-    } else {
-      setLoading(true);
-    }
+  const loadInitial = useCallback(async () => {
+    setLoading(true);
     setFailed(false);
     try {
       const { page, nextCursor: nc } = await loadPage();
@@ -86,14 +99,11 @@ export default function ChallengesDiscoveryPage() {
       setFailed(true);
     } finally {
       setLoading(false);
-      setRequerying(false);
     }
   }, [loadPage]);
 
-  const isFirstLoad = !challenges.length && !failed;
   useEffect(() => {
-    void loadInitial(!isFirstLoad);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    void loadInitial();
   }, [loadInitial]);
 
   const loadMore = useCallback(async () => {
@@ -114,9 +124,10 @@ export default function ChallengesDiscoveryPage() {
     setStatusFilter("all");
     setMinPool("");
     setEndBefore("");
+    setActiveTag(null);
   }
 
-  const hasFilters = statusFilter !== "all" || minPool !== "" || endBefore !== "";
+  const hasFilters = statusFilter !== "all" || minPool !== "" || endBefore !== "" || activeTag !== null;
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-12">
@@ -126,14 +137,14 @@ export default function ChallengesDiscoveryPage() {
       </p>
 
       {/* Filter controls */}
-      <div className="mb-6 flex flex-wrap items-end gap-3">
-        <div className="flex items-center gap-2">
+      <div className="mb-6 flex flex-col gap-4">
+        {/* Status chips */}
+        <div className="flex flex-wrap gap-2">
           {(["all", "active", "upcoming", "ended"] as StatusFilter[]).map((s) => (
             <button
               key={s}
-              disabled={requerying}
               onClick={() => setStatusFilter(s)}
-              className={`rounded-full border px-3 py-1 text-sm capitalize transition-colors disabled:opacity-50 ${
+              className={`rounded-full border px-3 py-1 text-sm capitalize transition-colors ${
                 statusFilter === s
                   ? "border-[var(--primary)] bg-[var(--primary)] text-white"
                   : "border-[var(--border)] hover:border-[var(--primary)]"
@@ -142,66 +153,75 @@ export default function ChallengesDiscoveryPage() {
               {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
             </button>
           ))}
-          {requerying && (
-            <span className="text-xs text-[var(--muted-foreground)] animate-pulse">
-              Updating…
-            </span>
+        </div>
+
+        {/* Tag filter chips */}
+        {tags.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-[var(--muted-foreground)]">Tags:</span>
+            {tags.map((t) => (
+              <button
+                key={t.slug}
+                onClick={() => setActiveTag(activeTag === t.slug ? null : t.slug)}
+                className={`rounded-full border px-3 py-1 text-sm transition-colors ${
+                  activeTag === t.slug
+                    ? "border-[var(--primary)] bg-[var(--primary)] text-white"
+                    : "border-[var(--border)] hover:border-[var(--primary)]"
+                }`}
+              >
+                {t.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Extra filters row */}
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex items-center gap-1">
+            <label className="text-sm text-[var(--muted-foreground)]">Min pool (USDC)</label>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={minPool}
+              onChange={(e) => setMinPool(e.target.value)}
+              placeholder="e.g. 100"
+              className="w-28 rounded border border-[var(--border)] bg-transparent px-2 py-1 text-sm"
+            />
+          </div>
+
+          <div className="flex items-center gap-1">
+            <label className="text-sm text-[var(--muted-foreground)]">Ends before</label>
+            <input
+              type="date"
+              value={endBefore}
+              onChange={(e) => setEndBefore(e.target.value)}
+              className="rounded border border-[var(--border)] bg-transparent px-2 py-1 text-sm"
+            />
+          </div>
+
+          {hasFilters && (
+            <button
+              onClick={clearFilters}
+              className="text-sm text-[var(--muted-foreground)] underline hover:text-[var(--foreground)]"
+            >
+              Clear filters
+            </button>
           )}
         </div>
-
-        <div className="flex items-center gap-1">
-          <label className="text-sm text-[var(--muted-foreground)]">Min pool (USDC)</label>
-          <input
-            type="number"
-            min="0"
-            step="0.01"
-            value={minPool}
-            disabled={requerying}
-            onChange={(e) => setMinPool(e.target.value)}
-            placeholder="e.g. 100"
-            className="w-28 rounded border border-[var(--border)] bg-transparent px-2 py-1 text-sm disabled:opacity-50"
-          />
-        </div>
-
-        <div className="flex items-center gap-1">
-          <label className="text-sm text-[var(--muted-foreground)]">Ends before</label>
-          <input
-            type="date"
-            value={endBefore}
-            disabled={requerying}
-            onChange={(e) => setEndBefore(e.target.value)}
-            className="rounded border border-[var(--border)] bg-transparent px-2 py-1 text-sm disabled:opacity-50"
-          />
-        </div>
-
-        {hasFilters && (
-          <button
-            onClick={clearFilters}
-            className="text-sm text-[var(--muted-foreground)] underline hover:text-[var(--foreground)]"
-          >
-            Clear filters
-          </button>
-        )}
       </div>
 
       {/* Results */}
-      {loading && !requerying ? (
+      {loading ? (
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
-            // Heights mirror the loaded card: logo h-12, badge 22px, title/description
-            // line heights, remaining-time line, and h-10 button.
-            <Card key={i} className="animate-pulse" aria-hidden="true">
+            <Card key={i} className="animate-pulse">
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div className="h-12 w-32 rounded-lg bg-[var(--muted)]" />
-                  <div className="h-[22px] w-16 rounded-full bg-[var(--muted)]" />
-                </div>
-                <div className="h-4 w-40 rounded bg-[var(--muted)]" />
-                <div className="h-5 w-48 rounded bg-[var(--muted)]" />
+                <div className="h-12 w-32 rounded bg-[var(--muted)] mb-2" />
+                <div className="h-5 w-40 rounded bg-[var(--muted)]" />
               </CardHeader>
               <CardContent>
-                <div className="mb-3 h-5 w-24 rounded bg-[var(--muted)]" />
-                <div className="h-10 w-full rounded-md bg-[var(--muted)]" />
+                <div className="h-10 w-full rounded bg-[var(--muted)]" />
               </CardContent>
             </Card>
           ))}
@@ -219,7 +239,7 @@ export default function ChallengesDiscoveryPage() {
           )}
         </div>
       ) : (
-        <div className={requerying ? "pointer-events-none opacity-50 transition-opacity" : "transition-opacity"}>
+        <>
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
             {challenges.map((c, index) => {
               const remaining = timeRemaining(c.ends_at ?? null);
@@ -290,7 +310,7 @@ export default function ChallengesDiscoveryPage() {
               You&apos;ve seen all {challenges.length} challenge{challenges.length !== 1 ? "s" : ""}
             </p>
           )}
-        </div>
+        </>
       )}
     </main>
   );

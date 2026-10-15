@@ -29,6 +29,7 @@ import { redis } from "../lib/redis";
 import { computeSessionHmac } from "../lib/integrity";
 import { updateStreak } from "../services/streaks";
 import { checkAndAwardSessionBadges } from "../services/badges";
+import { notifyOvertakenParticipants } from "../services/rank-overtaken";
 import { WARMUP_MIN_SECONDS } from "@brandblitz/stellar";
 import { tokenRevocationKey, tokenTtlSeconds } from "../middleware/authenticate";
 import { revalidateLeaderboard } from "../lib/revalidate";
@@ -330,6 +331,14 @@ router.post(
             await redis.del(...keys);
           }
           await revalidateLeaderboard().catch(() => {});
+
+          // Notify any participants that were overtaken by this score (fire-and-forget)
+          void notifyOvertakenParticipants(
+            completed.user_id,
+            completed.challenge_id,
+            completed.total_score,
+            challenge.challenge_id
+          );
         }
         const token = bearerToken(req);
         if (token) {

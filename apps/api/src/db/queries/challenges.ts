@@ -193,10 +193,11 @@ export async function getFilteredChallenges(opts: {
   status?: "active" | "upcoming" | "ended";
   minPoolUsdc?: number;
   endBefore?: string;
+  tagSlug?: string;
   cursor?: string;
   limit?: number;
 }): Promise<{ challenges: Challenge[]; nextCursor: string | null }> {
-  const { status, minPoolUsdc, endBefore, cursor, limit = 20 } = opts;
+  const { status, minPoolUsdc, endBefore, tagSlug, cursor, limit = 20 } = opts;
 
   const conditions: string[] = ["c.deleted_at IS NULL", "b.deleted_at IS NULL"];
   const params: unknown[] = [];
@@ -221,6 +222,17 @@ export async function getFilteredChallenges(opts: {
   if (endBefore) {
     params.push(endBefore);
     conditions.push(`c.ends_at < $${params.length}`);
+  }
+
+  if (tagSlug) {
+    params.push(tagSlug);
+    conditions.push(
+      `EXISTS (
+         SELECT 1 FROM challenge_tag_map m
+         JOIN challenge_tags t ON t.id = m.tag_id
+         WHERE m.challenge_id = c.id AND t.slug = $${params.length}
+       )`
+    );
   }
 
   if (cursor) {
