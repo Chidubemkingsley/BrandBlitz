@@ -34,6 +34,25 @@ export interface Challenge {
   deleted_at: string | null;
   created_at: string;
   challenge_license_id?: string | null;
+  is_gallery_template?: boolean;
+  gallery_opted_in_at?: string | null;
+}
+
+export interface GalleryTemplate {
+  id: string;
+  brand_id: string;
+  brand_name: string;
+  logo_url: string | null;
+  primary_color: string | null;
+  secondary_color: string | null;
+  pool_amount_usdc: string;
+  ends_at: string | null;
+  gallery_opted_in_at: string;
+  // performance stats from sessions
+  completed_sessions: number;
+  avg_score: number;
+  completion_rate_pct: number;
+  unique_participants: number;
 }
 
 export interface ChallengeQuestion {
@@ -602,4 +621,142 @@ export async function getDepositConfirmations(challengeId: string): Promise<numb
     [challengeId]
   );
   return result.rows[0]?.deposit_confirmations ?? null;
+}
+
+/**
+ * Get public gallery of top-performing challenges that brands have opted in.
+ * Includes aggregate performance stats. Does NOT expose escrow/participant PII.
+ */
+export async function getGalleryTemplates(opts: {
+  limit?: number;
+  cursor?: string;
+}): Promise<{ templates: GalleryTemplate[]; nextCursor: string | null }> {
+  const { limit = 20, cursor } = opts;
+
+  const params: unknown[] = [];
+  let cursorClause = "";
+  if (cursor) {
+    params.push(cursor);
+    cursorClause = `AND c.id > $${params.length}::uuid`;
+  }
+  params.push(limit + 1);
+
+  const result = await query<GalleryTemplate>(
+    `SELECT
+       c.id,
+       c.brand_id,
+       b.name                                                    AS brand_name,
+       b.logo_url,
+       b.primary_color,
+       b.secondary_color,
+       (c.pool_amount_stroops::numeric / 10000000)::numeric(20,7)::text AS pool_amount_usdc,
+       c.ends_at,
+       c.gallery_opted_in_at::text                              AS gallery_opted_in_at,
+       COUNT(gs.id) FILTER (WHERE gs.status = 'completed')::int AS completed_sessions,
+       COALESCE(ROUND(AVG(gs.total_score)::numeric, 2), 0)::float8 AS avg_score,
+       CASE WHEN COUNT(gs.id) = 0 THEN 0
+            ELSE ROUND(COUNT(gs.id) FILTER (WHERE gs.status = 'completed') * 100.0 / COUNT(gs.id), 2)::float8
+       END                                                       AS completion_rate_pct,
+       COUNT(DISTINCT gs.user_id)::int                          AS unique_participants
+     FROM challenges c
+     JOIN brands b ON b.id = c.brand_id
+     LEFT JOIN game_sessions gs ON gs.challenge_id = c.id
+     WHERE c.is_gallery_template = TRUE
+       AND c.deleted_at IS NULL
+       AND b.deleted_at IS NULL
+       AND c.status IN ('settled', 'ended', 'payout_failed')
+       ${cursorClause}
+     GROUP BY c.id, b.name, b.logo_url, b.primary_color, b.secondary_color
+     ORDER BY completed_sessions DESC, c.id ASC
+     LIMIT $${params.length}`,
+    params
+  );
+
+  const hasMore = result.rows.length > limit;
+  const templates = result.rows.slice(0, limit);
+  const nextCursor = hasMore && templates.length > 0 ? templates[templates.length - 1].id : null;
+  return { templates, nextCursor };
+}
+
+/**
+ * Opt a completed/settled challenge into the public gallery.
+ * Returns null if the challenge is not found, not in an ended status,
+ * or does not belong to the given brand.
+ */
+export async function optChallengeIntoGallery(
+  challengeId: string,
+  brandId: string
+): Promise<Challenge | null> {
+  const result = await query<Challenge>(
+    `UPDATE challenges
+     SET is_gallery_template = TRUE,
+         gallery_opted_in_at = NOW(),
+         updated_at           = NOW()
+     WHERE id = $1
+       AND brand_id = $2
+       AND status IN ('settled', 'ended', 'payout_failed')
+       AND deleted_at IS NULL
+     RETURNING *,
+       (pool_amount_stroops::numeric / 10000000)::numeric(20,7)::text AS pool_amount_usdc`,
+    [challengeId, brandId]
+  );
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Opt a challenge out of the gallery (undo).
+ */
+export async function optChallengeOutOfGallery(
+  challengeId: string,
+  brandId: string
+): Promise<Challenge | null> {
+  const result = await query<Challenge>(
+    `UPDATE challenges
+     SET is_gallery_template = FALSE,
+         gallery_opted_in_at = NULL,
+         updated_at           = NOW()
+     WHERE id = $1
+       AND brand_id = $2
+       AND deleted_at IS NULL
+     RETURNING *,
+       (pool_amount_stroops::numeric / 10000000)::numeric(20,7)::text AS pool_amount_usdc`,
+    [challengeId, brandId]
+  );
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Fetch a single gallery template by id (must be opted in and ended).
+ */
+export async function getGalleryTemplateById(
+  id: string
+): Promise<GalleryTemplate | null> {
+  const result = await query<GalleryTemplate>(
+    `SELECT
+       c.id,
+       c.brand_id,
+       b.name                                                    AS brand_name,
+       b.logo_url,
+       b.primary_color,
+       b.secondary_color,
+       (c.pool_amount_stroops::numeric / 10000000)::numeric(20,7)::text AS pool_amount_usdc,
+       c.ends_at,
+       c.gallery_opted_in_at::text                              AS gallery_opted_in_at,
+       COUNT(gs.id) FILTER (WHERE gs.status = 'completed')::int AS completed_sessions,
+       COALESCE(ROUND(AVG(gs.total_score)::numeric, 2), 0)::float8 AS avg_score,
+       CASE WHEN COUNT(gs.id) = 0 THEN 0
+            ELSE ROUND(COUNT(gs.id) FILTER (WHERE gs.status = 'completed') * 100.0 / COUNT(gs.id), 2)::float8
+       END                                                       AS completion_rate_pct,
+       COUNT(DISTINCT gs.user_id)::int                          AS unique_participants
+     FROM challenges c
+     JOIN brands b ON b.id = c.brand_id
+     LEFT JOIN game_sessions gs ON gs.challenge_id = c.id
+     WHERE c.id = $1
+       AND c.is_gallery_template = TRUE
+       AND c.deleted_at IS NULL
+       AND b.deleted_at IS NULL
+     GROUP BY c.id, b.name, b.logo_url, b.primary_color, b.secondary_color`,
+    [id]
+  );
+  return result.rows[0] ?? null;
 }
