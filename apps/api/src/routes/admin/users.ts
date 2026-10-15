@@ -7,6 +7,13 @@ import { findUserById, restoreUser, suspendUser, unsuspendUser } from "../../db/
 import { createErasureRequest, findPendingErasureRequest } from "../../db/queries/gdpr";
 import { enqueueGdprErasure } from "../../queues/gdpr-erasure.queue";
 import { query } from "../../db/index";
+import { CursorQuerySchema } from "../../db/pagination";
+import {
+  getCohortUsers,
+  getCohortUsersForExport,
+  COHORT_MAX_LIMIT,
+  type CohortFilter,
+} from "../../db/queries/cohort";
 
 const router = Router();
 
@@ -203,6 +210,120 @@ router.post("/:userId/restore", async (req, res) => {
   );
 
   res.json({ message: "User account has been restored." });
+});
+
+// ── Cohort / Segmentation ─────────────────────────────────────────────────────
+
+const CohortFilterSchema = z.object({
+  signup_source: z.enum(["referral", "organic"]).optional(),
+  league: z.enum(["bronze", "silver", "gold"]).optional(),
+  status: z.enum(["active", "suspended"]).optional(),
+  min_fraud_flags: z.coerce.number().int().min(0).optional(),
+  max_fraud_flags: z.coerce.number().int().min(0).optional(),
+  min_total_earned_usdc: z.coerce.number().min(0).optional(),
+  active_within_days: z.coerce.number().int().min(1).max(365).optional(),
+  created_after: z.string().datetime({ offset: true }).optional(),
+  created_before: z.string().datetime({ offset: true }).optional(),
+});
+
+const CohortQuerySchema = CursorQuerySchema.merge(CohortFilterSchema);
+
+/**
+ * GET /admin/users/cohort
+ * Return a paginated list of users matching the given filter criteria.
+ * All filter parameters are optional and ANDed together.
+ *
+ * Query params (all optional):
+ *   signup_source       "referral" | "organic"
+ *   league              "bronze" | "silver" | "gold"
+ *   status              "active" | "suspended"
+ *   min_fraud_flags     integer ≥ 0
+ *   max_fraud_flags     integer ≥ 0
+ *   min_total_earned_usdc  number ≥ 0
+ *   active_within_days  1–365
+ *   created_after       ISO 8601
+ *   created_before      ISO 8601
+ *   limit               1–500 (default 20)
+ *   cursor              opaque pagination token
+ *
+ * Restricted to admin role.
+ */
+router.get("/cohort", async (req, res) => {
+  const parsed = CohortQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw createError("Invalid query parameters", 400, "INVALID_QUERY");
+  }
+
+  const { limit, cursor, ...filterRaw } = parsed.data;
+  const filter = filterRaw as CohortFilter;
+  const effectiveLimit = Math.min(limit, COHORT_MAX_LIMIT);
+
+  const { users, total, nextCursor } = await getCohortUsers(filter, {
+    limit: effectiveLimit,
+    cursor,
+  });
+
+  res.json({ users, total, nextCursor });
+});
+
+// CSV column order
+const CSV_COLUMNS: Array<{ key: keyof import("../../db/queries/cohort").CohortUser; label: string }> = [
+  { key: "id", label: "id" },
+  { key: "email", label: "email" },
+  { key: "display_name", label: "display_name" },
+  { key: "username", label: "username" },
+  { key: "role", label: "role" },
+  { key: "status", label: "status" },
+  { key: "league", label: "league" },
+  { key: "total_score", label: "total_score" },
+  { key: "total_earned_usdc", label: "total_earned_usdc" },
+  { key: "challenges_played", label: "challenges_played" },
+  { key: "streak", label: "streak" },
+  { key: "last_active_at", label: "last_active_at" },
+  { key: "created_at", label: "created_at" },
+  { key: "referral_code", label: "referral_code" },
+  { key: "fraud_flag_count", label: "fraud_flag_count" },
+];
+
+function escapeCsvField(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const str = String(value);
+  // Wrap in quotes if field contains comma, double-quote, or newline
+  if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * GET /admin/users/cohort/export
+ * Export all matching cohort users as a CSV file (up to 10 000 rows).
+ * Accepts the same filter params as GET /admin/users/cohort.
+ * Returns Content-Disposition: attachment; filename="cohort-export.csv".
+ *
+ * Restricted to admin role.
+ */
+router.get("/cohort/export", async (req, res) => {
+  const parsed = CohortFilterSchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw createError("Invalid query parameters", 400, "INVALID_QUERY");
+  }
+
+  const filter = parsed.data as CohortFilter;
+  const users = await getCohortUsersForExport(filter);
+
+  const headerRow = CSV_COLUMNS.map((c) => c.label).join(",");
+  const dataRows = users.map((u) =>
+    CSV_COLUMNS.map((c) => escapeCsvField(u[c.key])).join(",")
+  );
+  const csv = [headerRow, ...dataRows].join("\n");
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="cohort-export-${new Date().toISOString().slice(0, 10)}.csv"`
+  );
+  res.send(csv);
 });
 
 export default router;

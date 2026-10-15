@@ -9,6 +9,8 @@ import {
   getChallengeByIdAny,
   getChallengesByBrandId,
   getChallengeQuestions,
+  optChallengeIntoGallery,
+  optChallengeOutOfGallery,
   type ActiveChallengesSort,
 } from "../db/queries/challenges";
 import { getBrandById } from "../db/queries/brands";
@@ -452,6 +454,58 @@ router.post("/:id/report", authenticate, requireActiveUser, reportLimiter, async
   } finally {
     client.release();
   }
+});
+
+/**
+ * POST /challenges/:id/template-opt-in
+ * Opt a completed/settled challenge into the public gallery.
+ * Only the owning brand can opt in. Challenge must have status settled/ended/payout_failed.
+ */
+router.post("/:id/template-opt-in", authenticate, async (req, res) => {
+  const { id: challengeId } = z.object({ id: z.string().uuid() }).parse(req.params);
+
+  const challenge = await getChallengeByIdAny(challengeId);
+  if (!challenge) throw createError("Challenge not found", 404);
+
+  const brand = await getBrandById(challenge.brand_id);
+  if (!brand || brand.owner_user_id !== req.user!.sub) {
+    throw createError("Forbidden", 403);
+  }
+
+  if (!["settled", "ended", "payout_failed"].includes(challenge.status)) {
+    throw createError(
+      "Only completed challenges (settled/ended/payout_failed) can be added to the gallery",
+      422,
+      "INVALID_STATUS"
+    );
+  }
+
+  const updated = await optChallengeIntoGallery(challengeId, brand.id);
+  if (!updated) throw createError("Challenge not found or could not be updated", 404);
+
+  res.json({ challenge: updated });
+});
+
+/**
+ * DELETE /challenges/:id/template-opt-in
+ * Remove a challenge from the public gallery (undo opt-in).
+ * Only the owning brand can opt out.
+ */
+router.delete("/:id/template-opt-in", authenticate, async (req, res) => {
+  const { id: challengeId } = z.object({ id: z.string().uuid() }).parse(req.params);
+
+  const challenge = await getChallengeByIdAny(challengeId);
+  if (!challenge) throw createError("Challenge not found", 404);
+
+  const brand = await getBrandById(challenge.brand_id);
+  if (!brand || brand.owner_user_id !== req.user!.sub) {
+    throw createError("Forbidden", 403);
+  }
+
+  const updated = await optChallengeOutOfGallery(challengeId, brand.id);
+  if (!updated) throw createError("Challenge not found", 404);
+
+  res.json({ challenge: updated });
 });
 
 export default router;

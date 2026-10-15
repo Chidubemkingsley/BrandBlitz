@@ -2,6 +2,7 @@ import type { Express } from "express";
 import authRoutes from "./auth";
 import brandsRoutes from "./brands";
 import challengesRoutes from "./challenges";
+import challengeTemplatesRoutes from "./challenge-templates";
 import sessionsRoutes from "./sessions";
 import uploadRoutes from "./upload";
 import usersRoutes from "./users";
@@ -41,6 +42,7 @@ export function registerRoutes(app: Express): void {
   app.use("/auth", authRoutes);
   app.use("/brands", brandsRoutes);
   app.use("/challenges", challengesRoutes);
+  app.use("/challenge-templates", challengeTemplatesRoutes);
   app.use("/sessions", sessionsRoutes);
   app.use("/upload", uploadRoutes);
   app.use("/users", usersRoutes);

@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/lib/toast";
 import { QueueStatsCard, type QueueStats } from "./queue-stats-card";
 import { FailedJobsCard, type FailedJob } from "./failed-jobs-card";
+import { CohortBuilder } from "./cohort-builder";
 
 interface DauEntry {
   date: string;
