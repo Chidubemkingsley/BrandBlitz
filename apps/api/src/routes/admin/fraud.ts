@@ -7,6 +7,7 @@ import {
   getFraudFlags,
   getFraudFlagById,
   updateFraudFlagStatus,
+  setFraudScoreOverride,
   getUserReports,
 } from "../../db/queries/fraud-flags";
 import { CursorQuerySchema } from "../../db/pagination";
@@ -25,6 +26,12 @@ const ListQuerySchema = CursorQuerySchema.extend({
 const PatchBodySchema = z.object({
   status: z.enum(["resolved", "escalated"]),
   reason: z.string().min(1, "Resolution reason is required"),
+}).strict();
+
+const FraudScoreOverrideBodySchema = z.object({
+  // null clears a previously set override, reverting to the computed score.
+  score: z.number().int().min(0).nullable(),
+  reason: z.string().min(1, "Override reason is required"),
 }).strict();
 
 /**
@@ -101,6 +108,31 @@ router.patch("/:id", async (req, res) => {
     resolutionReason: updated!.resolution_reason,
     resolvedBy: updated!.resolved_by,
     resolvedAt: updated!.resolved_at,
+  });
+});
+
+/**
+ * POST /admin/fraud-flags/users/:userId/score-override
+ * Manually overrides a user's fraud score (null clears the override),
+ * with a required reason logged to audit_log (#1010).
+ */
+router.post("/users/:userId/score-override", async (req, res) => {
+  const { score, reason } = FraudScoreOverrideBodySchema.parse(req.body);
+
+  const updated = await setFraudScoreOverride(
+    req.params.userId,
+    score,
+    reason,
+    req.user!.sub
+  );
+  if (!updated) throw createError("User not found", 404, "NOT_FOUND");
+
+  res.json({
+    userId: updated.user_id,
+    fraudScoreOverride: updated.fraud_score_override,
+    fraudScoreOverrideReason: updated.fraud_score_override_reason,
+    fraudScoreOverrideBy: updated.fraud_score_override_by,
+    fraudScoreOverrideAt: updated.fraud_score_override_at,
   });
 });
 

@@ -7,7 +7,9 @@ import {
   getTopSessionsPerChallenge,
   getGlobalLeaderboardFromView,
   LEADERBOARD_SORTS,
+  LEADERBOARD_WINDOWS,
   type LeaderboardSort,
+  type LeaderboardWindow,
 } from "../db/queries/sessions";
 import { getReferralNetworkUserIds } from "../db/queries/referrals";
 import { withCoalescing } from "../lib/cache";
@@ -22,6 +24,25 @@ const LEADERBOARD_CACHE_TTL_SEC = 30;
 // Keep leaderboard ORDER BY clauses static or selected from this allowlist only.
 // User query params must never be concatenated directly into SQL strings.
 const LeaderboardSortSchema = z.enum(LEADERBOARD_SORTS).default("score");
+
+// Time-window filter for a challenge's leaderboard (#1006).
+const LeaderboardWindowSchema = z.enum(LEADERBOARD_WINDOWS).default("all-time");
+
+function parseLeaderboardWindow(query: unknown): LeaderboardWindow {
+  const raw =
+    typeof query === "object" && query !== null
+      ? (query as Record<string, unknown>).window
+      : undefined;
+  const parsed = LeaderboardWindowSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw createError(
+      `Invalid leaderboard window. Allowed values: ${LEADERBOARD_WINDOWS.join(", ")}`,
+      400,
+      "INVALID_WINDOW"
+    );
+  }
+  return parsed.data;
+}
 
 function parseLeaderboardSort(query: unknown): LeaderboardSort {
   const raw =
@@ -229,9 +250,12 @@ router.get("/:challengeId/export.csv", optionalAuth, async (req, res, next) => {
  *
  * Query params:
  *  - scope: "global" (default) | "friends" — filter to referral network
+ *  - window: "daily" | "weekly" | "all-time" (default) — filter to sessions
+ *    completed within that window (#1006)
  */
 router.get("/:challengeId", optionalAuth, async (req, res) => {
   const sortBy = parseLeaderboardSort(req.query);
+  const window = parseLeaderboardWindow(req.query);
   const { limit, cursor, offset } = CursorQuerySchema.parse(req.query);
   const scopeRaw = typeof req.query.scope === "string" ? req.query.scope : undefined;
   const scope = scopeRaw === "friends" ? "friends" : "global";
@@ -252,7 +276,7 @@ router.get("/:challengeId", optionalAuth, async (req, res) => {
   }
 
   const scopeKey = scope === "friends" ? `friends:${userId ?? "anon"}` : "global";
-  const cacheKey = `leaderboard:${sortBy}:${req.params.challengeId}:${limit}:${cursor ?? ""}:${scopeKey}`;
+  const cacheKey = `leaderboard:${sortBy}:${window}:${req.params.challengeId}:${limit}:${cursor ?? ""}:${scopeKey}`;
 
   const responseBody = await withCoalescing(cacheKey, LEADERBOARD_CACHE_TTL_SEC, async () => {
     const scopeFriendIds = scope === "friends" ? friendUserIds : undefined;
@@ -261,7 +285,8 @@ router.get("/:challengeId", optionalAuth, async (req, res) => {
       limit,
       cursor,
       sortBy,
-      scopeFriendIds
+      scopeFriendIds,
+      window
     );
 
     const mappedSessions = result.sessions.map((s, i) => ({
@@ -280,6 +305,7 @@ router.get("/:challengeId", optionalAuth, async (req, res) => {
       data: mappedSessions,
       nextCursor: result.nextCursor,
       scope,
+      window,
     };
   });
 

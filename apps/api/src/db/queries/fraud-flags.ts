@@ -159,6 +159,58 @@ export async function getFraudFlagById(id: string): Promise<FraudFlagDetail | nu
   return result.rows[0] ?? null;
 }
 
+export interface FraudScoreOverride {
+  user_id: string;
+  fraud_score_override: number | null;
+  fraud_score_override_reason: string | null;
+  fraud_score_override_by: string | null;
+  fraud_score_override_at: string | null;
+}
+
+/**
+ * Sets (or clears, when `score` is null) a manual fraud score override for
+ * a user, logging the before/after and reason to audit_log (#1010).
+ */
+export async function setFraudScoreOverride(
+  userId: string,
+  score: number | null,
+  reason: string,
+  actorId: string
+): Promise<FraudScoreOverride | null> {
+  const before = await query<FraudScoreOverride>(
+    `SELECT id AS user_id, fraud_score_override, fraud_score_override_reason,
+            fraud_score_override_by, fraud_score_override_at
+     FROM users WHERE id = $1`,
+    [userId]
+  );
+  if (before.rows.length === 0) return null;
+
+  const result = await query<FraudScoreOverride>(
+    `UPDATE users
+     SET fraud_score_override = $1,
+         fraud_score_override_reason = $2,
+         fraud_score_override_by = $3,
+         fraud_score_override_at = NOW()
+     WHERE id = $4
+     RETURNING id AS user_id, fraud_score_override, fraud_score_override_reason,
+               fraud_score_override_by, fraud_score_override_at`,
+    [score, reason, actorId, userId]
+  );
+
+  await query(
+    `INSERT INTO audit_log (actor_id, action, entity, entity_key, before, after)
+     VALUES ($1, 'update', 'fraud_score_override', $2, $3, $4)`,
+    [
+      actorId,
+      userId,
+      { fraud_score_override: before.rows[0].fraud_score_override },
+      { fraud_score_override: score, reason },
+    ]
+  );
+
+  return result.rows[0] ?? null;
+}
+
 export async function updateFraudFlagStatus(
   id: string,
   status: "resolved" | "escalated",

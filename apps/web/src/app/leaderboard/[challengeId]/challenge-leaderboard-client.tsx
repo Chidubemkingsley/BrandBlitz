@@ -16,6 +16,14 @@ interface Props {
   initialHasMore: boolean;
 }
 
+type LeaderboardWindow = "daily" | "weekly" | "all-time";
+
+const WINDOW_OPTIONS: { value: LeaderboardWindow; label: string }[] = [
+  { value: "daily", label: "Daily" },
+  { value: "weekly", label: "Weekly" },
+  { value: "all-time", label: "All-Time" },
+];
+
 export function ChallengeLeaderboardClient({
   challengeId,
   initialEntries,
@@ -23,6 +31,7 @@ export function ChallengeLeaderboardClient({
 }: Props) {
   const { data: session, status } = useSession();
   const [scope, setScope] = useState<LeaderboardScope>("global");
+  const [window_, setWindow] = useState<LeaderboardWindow>("all-time");
   const [entries, setEntries] = useState<LeaderboardEntry[]>(initialEntries);
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [isLoadingFriends, setIsLoadingFriends] = useState(false);
@@ -30,28 +39,30 @@ export function ChallengeLeaderboardClient({
 
   const isLoggedIn = status === "authenticated";
 
+  // Default scope+window matches the server-rendered page; anything else
+  // (friends scope, or a non-default time window, #1006) refetches client-side.
   useEffect(() => {
-    if (scope !== "friends") {
+    if (scope !== "friends" && window_ === "all-time") {
       setEntries(initialEntries);
       setHasMore(initialHasMore);
       setFriendsFailed(false);
       return;
     }
 
-    if (!isLoggedIn) {
+    if (scope === "friends" && !isLoggedIn) {
       setEntries([]);
       setHasMore(false);
       return;
     }
 
-    const loadFriendsLeaderboard = async () => {
+    const loadLeaderboard = async () => {
       setIsLoadingFriends(true);
       setFriendsFailed(false);
       try {
         const token = session?.apiToken;
         const client = token ? createApiClient(token) : api;
         const res = await client.get(
-          `/leaderboard/${challengeId}?limit=50&scope=friends`
+          `/leaderboard/${challengeId}?limit=50&scope=${scope}&window=${window_}`
         );
         const data: LeaderboardEntry[] = res.data.data || res.data.sessions || [];
         setEntries(data);
@@ -65,8 +76,16 @@ export function ChallengeLeaderboardClient({
       }
     };
 
-    void loadFriendsLeaderboard();
-  }, [scope, isLoggedIn, challengeId, initialEntries, initialHasMore, session?.apiToken]);
+    void loadLeaderboard();
+  }, [
+    scope,
+    window_,
+    isLoggedIn,
+    challengeId,
+    initialEntries,
+    initialHasMore,
+    session?.apiToken,
+  ]);
 
   return (
     <div>
@@ -96,6 +115,26 @@ export function ChallengeLeaderboardClient({
           >
             Friends
           </Button>
+        </div>
+
+        <div
+          role="tablist"
+          aria-label="Leaderboard time window"
+          className="inline-flex items-center rounded-md bg-[var(--muted)] p-1"
+        >
+          {WINDOW_OPTIONS.map((option) => (
+            <Button
+              key={option.value}
+              role="tab"
+              aria-selected={window_ === option.value}
+              size="sm"
+              variant={window_ === option.value ? "default" : "ghost"}
+              className="h-8"
+              onClick={() => setWindow(option.value)}
+            >
+              {option.label}
+            </Button>
+          ))}
         </div>
 
         {scope === "friends" && !isLoggedIn && (

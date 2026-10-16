@@ -377,7 +377,16 @@ router.get("/:id/leaderboard", optionalAuth, async (req, res) => {
   const tierId = typeof req.query.tier_id === "string" ? req.query.tier_id : undefined;
   const result = challenge.archived
     ? await getArchivedLeaderboard(challenge.id, limit, cursor)
-    : await getLeaderboard(challenge.id, limit, cursor, sortBy, undefined, tierId, req.user?.sub);
+    : await getLeaderboard(
+        challenge.id,
+        limit,
+        cursor,
+        sortBy,
+        undefined,
+        "all-time",
+        tierId,
+        req.user?.sub
+      );
 
   res.json({
     challengeId: challenge.id,
