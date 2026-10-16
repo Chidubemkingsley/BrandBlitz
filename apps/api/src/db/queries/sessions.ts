@@ -97,6 +97,53 @@ export async function getSession(userId: string, challengeId: string): Promise<G
   return result.rows[0] ?? null;
 }
 
+export interface SessionShareCard {
+  session_id: string;
+  challenge_id: string;
+  brand_name: string;
+  logo_url: string | null;
+  primary_color: string | null;
+  secondary_color: string | null;
+  total_score: number;
+  rank: number | null;
+  completed_at: string;
+  display_name: string | null;
+  username: string | null;
+  avatar_url: string | null;
+}
+
+/**
+ * Public, shareable summary of a completed session (#1011). Excludes
+ * practice runs and flagged sessions, and never exposes email -- this is
+ * meant to be rendered on a public share card/link.
+ */
+export async function getSessionShareCard(sessionId: string): Promise<SessionShareCard | null> {
+  const result = await query<SessionShareCard>(
+    `SELECT gs.id AS session_id,
+            gs.challenge_id,
+            b.name AS brand_name,
+            b.logo_url,
+            b.primary_color,
+            b.secondary_color,
+            gs.total_score,
+            gs.rank,
+            gs.completed_at,
+            u.display_name,
+            u.username,
+            u.avatar_url
+     FROM game_sessions gs
+     JOIN challenges c ON c.id = gs.challenge_id
+     JOIN brands b ON b.id = c.brand_id
+     JOIN users u ON u.id = gs.user_id
+     WHERE gs.id = $1
+       AND gs.completed_at IS NOT NULL
+       AND gs.is_practice = FALSE
+       AND gs.flagged = FALSE`,
+    [sessionId]
+  );
+  return result.rows[0] ?? null;
+}
+
 export async function deleteOpenSession(userId: string, challengeId: string): Promise<boolean> {
   const result = await query(
     `DELETE FROM game_sessions
@@ -298,12 +345,22 @@ export async function markAbandonedSessions(): Promise<number> {
   return result.rows[0]?.count ?? 0;
 }
 
+export const LEADERBOARD_WINDOWS = ["daily", "weekly", "all-time"] as const;
+export type LeaderboardWindow = (typeof LEADERBOARD_WINDOWS)[number];
+
+/** How far back `completed_at` must fall for each time-window filter (#1006). */
+const LEADERBOARD_WINDOW_INTERVALS: Record<Exclude<LeaderboardWindow, "all-time">, string> = {
+  daily: "1 day",
+  weekly: "7 days",
+};
+
 export async function getLeaderboard(
   challengeId: string,
   limit = 20,
   cursor?: string,
   sortBy: LeaderboardSort = "score",
-  friendUserIds?: string[]
+  friendUserIds?: string[],
+  window: LeaderboardWindow = "all-time"
 ): Promise<{ sessions: LeaderboardSession[]; nextCursor: string | null }> {
   const orderBy = leaderboardOrderBy[sortBy];
   const cursorValues = decodeCursorSafe(cursor, ["total_score", "completed_at", "id"]);
@@ -314,8 +371,12 @@ export async function getLeaderboard(
   const params: unknown[] = [challengeId];
 
   if (friendUserIds && friendUserIds.length > 0) {
-    whereExtra = `AND gs.user_id = ANY($${params.length + 1}::uuid[])`;
+    whereExtra += ` AND gs.user_id = ANY($${params.length + 1}::uuid[])`;
     params.push(friendUserIds);
+  }
+
+  if (window !== "all-time") {
+    whereExtra += ` AND gs.completed_at >= NOW() - INTERVAL '${LEADERBOARD_WINDOW_INTERVALS[window]}'`;
   }
 
   if (cursorValues) {
