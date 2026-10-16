@@ -26,6 +26,20 @@ export interface FraudFlagDetail extends FraudFlag {
   device_id: string | null;
 }
 
+export async function getUserReports(opts: { status?: string; limit: number }) {
+  const result = await query<{
+    id: string; reporter_id: string; reported_id: string; reason: string; details: string | null;
+    status: string; created_at: string;
+  }>(
+    `SELECT id, reporter_id, reported_id, reason, details, status, created_at
+     FROM user_reports
+     WHERE ($1::text IS NULL OR status = $1)
+     ORDER BY created_at DESC LIMIT $2`,
+    [opts.status ?? null, opts.limit]
+  );
+  return result.rows;
+}
+
 export async function createFraudFlag(data: {
   sessionId: string;
   userId: string;

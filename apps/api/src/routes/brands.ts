@@ -121,6 +121,12 @@ const ChallengeSchema = z.object({
   maxPlayers: z.number().int().positive().optional(),
   endsAt: z.string().datetime(),
   licenseId: z.string().uuid().optional(),
+  variants: z.array(z.object({ name: z.string().trim().min(1).max(100), questionConfig: z.record(z.unknown()).default({}) })).max(2).optional(),
+  tiers: z.array(z.object({
+    name: z.string().trim().min(1).max(100),
+    entryFeeUsdc: z.string().regex(/^\d+(\.\d{1,7})?$/).refine((value) => Number(value) >= 0),
+    prizePoolUsdc: z.string().regex(/^\d+(\.\d{1,7})?$/).refine((value) => Number(value) > 0),
+  })).min(1).max(10).optional(),
 });
 
 const LicenseChallengeSchema = z.object({ challengeId: z.string().uuid() }).strict();
@@ -690,6 +696,12 @@ router.post("/challenges", authenticate, requireCurrentTosAccepted, async (req, 
   }
   const body = parsedBody.data;
   validateChallengeEndsAt(body.endsAt);
+  if (body.tiers) {
+    const totalPrizePool = body.tiers.reduce((sum, tier) => sum + Number(tier.prizePoolUsdc), 0);
+    if (Math.abs(totalPrizePool - Number(body.poolAmountUsdc)) > 0.0000001) {
+      throw createError("Challenge pool must equal the sum of tier prize pools", 422, "TIER_POOL_MISMATCH");
+    }
+  }
 
   const brand = await getBrandById(body.brandId);
   if (!brand) throw createError("Brand not found", 404);
@@ -711,6 +723,25 @@ router.post("/challenges", authenticate, requireCurrentTosAccepted, async (req, 
     endsAt: body.endsAt,
     licenseId: license?.id,
   });
+
+  if (body.variants?.length) {
+    for (const variant of body.variants) {
+      await query(
+        `INSERT INTO challenge_variants (challenge_id, name, question_config)
+         VALUES ($1, $2, $3::jsonb)`,
+        [challenge.id, variant.name, JSON.stringify(variant.questionConfig)]
+      );
+    }
+  }
+  if (body.tiers) {
+    for (const tier of body.tiers) {
+      await query(
+        `INSERT INTO challenge_tiers (challenge_id, name, entry_fee_stroops, prize_pool_stroops)
+         VALUES ($1, $2, ROUND(CAST($3 AS numeric) * 10000000), ROUND(CAST($4 AS numeric) * 10000000))`,
+        [challenge.id, tier.name, tier.entryFeeUsdc, tier.prizePoolUsdc]
+      );
+    }
+  }
 
   const distractorBrands = await getActiveDistractorBrands(body.brandId);
   if (distractorBrands.length === 0) {

@@ -24,6 +24,8 @@ export interface GameSession {
   flag_reasons: string[] | null;
   is_practice: boolean;
   integrity_hmac: string | null;
+  variant_id: string | null;
+  tier_id: string | null;
   abandon_reason: "timeout" | "error" | "explicit" | null;
   created_at: string;
 }
@@ -78,13 +80,15 @@ export async function claimSession(data: {
   challengeId: string;
   deviceId?: string;
   isPractice?: boolean;
+  variantId?: string | null;
+  tierId?: string | null;
 }): Promise<GameSession | null> {
   const result = await query<GameSession>(
-    `INSERT INTO game_sessions (user_id, challenge_id, device_id, is_practice)
-     VALUES ($1,$2,$3,$4)
+    `INSERT INTO game_sessions (user_id, challenge_id, device_id, is_practice, variant_id, tier_id)
+     VALUES ($1,$2,$3,$4,$5,$6)
      ON CONFLICT (user_id, challenge_id) DO NOTHING
      RETURNING *`,
-    [data.userId, data.challengeId, data.deviceId ?? null, data.isPractice ?? false]
+    [data.userId, data.challengeId, data.deviceId ?? null, data.isPractice ?? false, data.variantId ?? null, data.tierId ?? null]
   );
   return result.rows[0] ?? null;
 }
@@ -360,7 +364,9 @@ export async function getLeaderboard(
   cursor?: string,
   sortBy: LeaderboardSort = "score",
   friendUserIds?: string[],
-  window: LeaderboardWindow = "all-time"
+  window: LeaderboardWindow = "all-time",
+  tierId?: string,
+  viewerUserId?: string
 ): Promise<{ sessions: LeaderboardSession[]; nextCursor: string | null }> {
   const orderBy = leaderboardOrderBy[sortBy];
   const cursorValues = decodeCursorSafe(cursor, ["total_score", "completed_at", "id"]);
@@ -377,6 +383,20 @@ export async function getLeaderboard(
 
   if (window !== "all-time") {
     whereExtra += ` AND gs.completed_at >= NOW() - INTERVAL '${LEADERBOARD_WINDOW_INTERVALS[window]}'`;
+  }
+
+  if (tierId) {
+    whereExtra += ` AND gs.tier_id = $${params.length + 1}`;
+    params.push(tierId);
+  }
+
+  if (viewerUserId) {
+    whereExtra += ` AND NOT EXISTS (
+      SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = $${params.length + 1} AND ub.blocked_id = gs.user_id)
+         OR (ub.blocked_id = $${params.length + 1} AND ub.blocker_id = gs.user_id)
+    )`;
+    params.push(viewerUserId);
   }
 
   if (cursorValues) {

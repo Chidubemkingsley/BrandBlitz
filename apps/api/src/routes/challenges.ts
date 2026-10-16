@@ -297,7 +297,40 @@ router.get("/:id/stats", authenticate, async (req, res) => {
     [challenge.id]
   );
 
-  res.json({ stats: result.rows[0] });
+  const variantStats = await query(
+    `SELECT cv.id, cv.name,
+            COUNT(gs.id)::int AS total_sessions,
+            COUNT(gs.id) FILTER (WHERE gs.status = 'completed')::int AS completed_sessions,
+            COALESCE(ROUND(AVG(srs.score)::numeric, 2), 0)::float8 AS avg_score,
+            COALESCE(ROUND(AVG(CASE WHEN srs.answer = cq.correct_option THEN 100.0 ELSE 0 END)::numeric, 2), 0)::float8 AS avg_accuracy_pct
+     FROM challenge_variants cv
+     LEFT JOIN game_sessions gs ON gs.variant_id = cv.id
+     LEFT JOIN session_round_scores srs ON srs.session_id = gs.id
+     LEFT JOIN challenge_questions cq ON cq.challenge_id = gs.challenge_id AND cq.round = srs.round
+     WHERE cv.challenge_id = $1
+     GROUP BY cv.id, cv.name ORDER BY cv.name`,
+    [challenge.id]
+  );
+
+  res.json({ stats: result.rows[0], variantStats: variantStats.rows });
+});
+
+router.post("/:id/variants/:variantId/promote", authenticate, async (req, res) => {
+  const challenge = await getChallengeByIdAny(req.params.id);
+  if (!challenge) throw createError("Challenge not found", 404);
+  const brand = await getBrandById(challenge.brand_id);
+  if (!brand || brand.owner_user_id !== req.user!.sub) throw createError("Forbidden", 403);
+  const result = await query(
+    `UPDATE challenge_variants
+     SET status = CASE WHEN id = $2 THEN 'promoted' ELSE 'ended' END
+     WHERE challenge_id = $1
+     RETURNING id, name, status`,
+    [challenge.id, req.params.variantId]
+  );
+  if (!result.rows.some((variant) => variant.id === req.params.variantId)) {
+    throw createError("Variant not found", 404);
+  }
+  res.json({ promotedVariantId: req.params.variantId, variants: result.rows });
 });
 
 const ChallengeIdParamSchema = z.object({
@@ -335,15 +368,25 @@ router.get("/:id/session", authenticate, async (req, res) => {
  * GET /challenges/:id/leaderboard
  * Paginated leaderboard for a challenge. Supports keyset cursor pagination.
  */
-router.get("/:id/leaderboard", async (req, res) => {
+router.get("/:id/leaderboard", optionalAuth, async (req, res) => {
   const challenge = await getChallengeByIdAny(req.params.id);
   if (!challenge) throw createError("Challenge not found", 404);
 
   const sortBy = parseLeaderboardSort(req.query);
   const { limit, cursor } = CursorQuerySchema.parse(req.query);
+  const tierId = typeof req.query.tier_id === "string" ? req.query.tier_id : undefined;
   const result = challenge.archived
     ? await getArchivedLeaderboard(challenge.id, limit, cursor)
-    : await getLeaderboard(challenge.id, limit, cursor, sortBy);
+    : await getLeaderboard(
+        challenge.id,
+        limit,
+        cursor,
+        sortBy,
+        undefined,
+        "all-time",
+        tierId,
+        req.user?.sub
+      );
 
   res.json({
     challengeId: challenge.id,
