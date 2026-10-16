@@ -36,10 +36,12 @@ import { logger } from "../lib/logger";
 
 const router: Router = Router();
 
-const UserReportSchema = z.object({
-  reason: z.enum(["harassment", "spam", "impersonation", "other"]),
-  details: z.string().trim().max(1000).optional(),
-}).strict();
+const UserReportSchema = z
+  .object({
+    reason: z.enum(["harassment", "spam", "impersonation", "other"]),
+    details: z.string().trim().max(1000).optional(),
+  })
+  .strict();
 
 router.post("/:id/report", authenticate, reportLimiter, async (req, res) => {
   const body = UserReportSchema.parse(req.body);
@@ -95,6 +97,135 @@ router.get("/me", authenticate, async (req, res) => {
   };
 
   res.json({ user: safeUser });
+});
+
+/**
+ * GET /users/me/api-keys
+ * List personal API keys for the authenticated user. Never exposes secret key hash.
+ * Closes #1027
+ */
+router.get("/me/api-keys", authenticate, async (req, res) => {
+  const result = await query<{
+    id: string;
+    name: string;
+    key_prefix: string;
+    scopes: string[];
+    created_at: string;
+    last_used_at: string | null;
+    revoked_at: string | null;
+  }>(
+    `SELECT id, name, key_prefix, scopes, created_at, last_used_at, revoked_at
+     FROM api_keys
+     WHERE user_id = $1
+     ORDER BY created_at DESC`,
+    [req.user!.sub]
+  );
+
+  res.json({
+    keys: result.rows.map((k) => ({
+      id: k.id,
+      name: k.name,
+      keyPrefix: k.key_prefix,
+      scopes: k.scopes,
+      createdAt: k.created_at,
+      lastUsedAt: k.last_used_at,
+      revokedAt: k.revoked_at,
+      isActive: k.revoked_at === null,
+    })),
+  });
+});
+
+const CreateApiKeySchema = z.object({
+  name: z.string().trim().min(1, "Key name is required").max(100),
+});
+
+/**
+ * POST /users/me/api-keys
+ * Generate a new personal API key. Returned once in full plaintext.
+ * Closes #1027
+ */
+router.post("/me/api-keys", authenticate, async (req, res) => {
+  const { name } = CreateApiKeySchema.parse(req.body);
+  const randomHex = crypto.randomBytes(24).toString("hex");
+  const fullKey = `bb_live_${randomHex}`;
+  const keyPrefix = fullKey.slice(0, 14);
+  const keyHash = crypto.createHash("sha256").update(fullKey).digest("hex");
+
+  const result = await query<{
+    id: string;
+    name: string;
+    key_prefix: string;
+    scopes: string[];
+    created_at: string;
+  }>(
+    `INSERT INTO api_keys (user_id, name, key_prefix, key_hash, scopes)
+     VALUES ($1, $2, $3, $4, ARRAY['read:stats']::TEXT[])
+     RETURNING id, name, key_prefix, scopes, created_at`,
+    [req.user!.sub, name, keyPrefix, keyHash]
+  );
+
+  const row = result.rows[0];
+
+  res.status(201).json({
+    id: row.id,
+    name: row.name,
+    key: fullKey,
+    keyPrefix: row.key_prefix,
+    scopes: row.scopes,
+    createdAt: row.created_at,
+  });
+});
+
+/**
+ * DELETE /users/me/api-keys/:id
+ * Revoke a personal API key.
+ * Closes #1027
+ */
+router.delete("/me/api-keys/:id", authenticate, async (req, res) => {
+  const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+
+  const result = await query<{ key_hash: string }>(
+    `UPDATE api_keys
+     SET revoked_at = NOW()
+     WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+     RETURNING key_hash`,
+    [id, req.user!.sub]
+  );
+
+  if (result.rows.length === 0) {
+    throw createError("API key not found or already revoked", 404);
+  }
+
+  const hash = result.rows[0].key_hash;
+  await redis.del(`apikey:hash:${hash}`).catch(() => null);
+
+  res.json({ success: true, message: "API key revoked" });
+});
+
+/**
+ * PATCH /users/me/reminder-preferences
+ * Update challenge reminder lead-time preferences.
+ * Closes #1025
+ */
+router.patch("/me/reminder-preferences", authenticate, async (req, res) => {
+  const schema = z.object({
+    defaultLeadTimeMinutes: z.number().int().min(1).max(10080),
+  });
+  const { defaultLeadTimeMinutes } = schema.parse(req.body);
+
+  await redis
+    .set(
+      `user:pref:reminder_lead_time:${req.user!.sub}`,
+      defaultLeadTimeMinutes.toString(),
+      "EX",
+      365 * 86400
+    )
+    .catch(() => null);
+
+  res.json({
+    success: true,
+    defaultLeadTimeMinutes,
+  });
 });
 
 /**
