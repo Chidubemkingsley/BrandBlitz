@@ -1,17 +1,125 @@
 import { Router } from "express";
 import { z } from "zod";
-import { authenticate } from "../../middleware/authenticate";
+import jwt from "jsonwebtoken";
+import { authenticate, tokenRevocationKey, tokenTtlSeconds } from "../../middleware/authenticate";
 import { requireAdmin } from "../../middleware/require-admin";
 import { createError } from "../../middleware/error";
 import { findUserById, restoreUser, suspendUser, unsuspendUser } from "../../db/queries/users";
 import { createErasureRequest, findPendingErasureRequest } from "../../db/queries/gdpr";
 import { enqueueGdprErasure } from "../../queues/gdpr-erasure.queue";
 import { query } from "../../db/index";
+import { CursorQuerySchema } from "../../db/pagination";
+import {
+  getCohortUsers,
+  getCohortUsersForExport,
+  COHORT_MAX_LIMIT,
+  type CohortFilter,
+} from "../../db/queries/cohort";
+import { config } from "../../lib/config";
+import { redis } from "../../lib/redis";
 
 const router = Router();
 
 router.use(authenticate);
+
+/**
+ * POST /admin/users/impersonate-exit
+ * Exit an impersonated session, revoking the token and logging to audit_log.
+ * Mounted before requireAdmin so the impersonated session can call it.
+ */
+router.post("/impersonate-exit", async (req, res) => {
+  const user = req.user;
+  if (!user) throw createError("Unauthorized", 401);
+
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (token) {
+    const ttl = tokenTtlSeconds(user);
+    await redis.set(tokenRevocationKey(token), "1", "EX", ttl).catch(() => null);
+  }
+
+  const adminId = user.impersonatedBy ?? user.sub;
+  const targetUserId = user.sub;
+
+  await query(
+    `INSERT INTO audit_log (actor_id, action, entity, entity_key, after)
+     VALUES ($1, 'impersonation_end', 'user', $2, $3)`,
+    [
+      adminId,
+      targetUserId,
+      JSON.stringify({
+        adminId,
+        targetUserId,
+        endedAt: new Date().toISOString(),
+      }),
+    ]
+  );
+
+  res.json({
+    success: true,
+    message: "Impersonation session ended.",
+  });
+});
+
 router.use(requireAdmin);
+
+/**
+ * POST /admin/users/:userId/impersonate-token
+ * Issue a scoped, read-only session token to impersonate a target user.
+ * Logged to audit_log. Closes #1024.
+ */
+router.post("/:userId/impersonate-token", async (req, res) => {
+  const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
+
+  const target = await findUserById(userId);
+  if (!target) throw createError("User not found", 404);
+  if (target.role === "admin") {
+    throw createError("Cannot impersonate an admin user", 403, "FORBIDDEN");
+  }
+
+  const expiresInSeconds = 900; // 15-minute fixed window
+  const token = jwt.sign(
+    {
+      sub: target.id,
+      email: target.email,
+      role: target.role,
+      isImpersonated: true,
+      impersonatedBy: req.user!.sub,
+      iss: config.JWT_ISSUER,
+      aud: config.JWT_AUDIENCE,
+    },
+    config.JWT_SECRET,
+    { expiresIn: expiresInSeconds }
+  );
+
+  await query(
+    `INSERT INTO audit_log (actor_id, action, entity, entity_key, after)
+     VALUES ($1, 'impersonation_start', 'user', $2, $3)`,
+    [
+      req.user!.sub,
+      target.id,
+      JSON.stringify({
+        adminId: req.user!.sub,
+        targetUserId: target.id,
+        targetEmail: target.email,
+        expiresInSeconds,
+        startedAt: new Date().toISOString(),
+      }),
+    ]
+  );
+
+  res.json({
+    token,
+    expiresIn: expiresInSeconds,
+    user: {
+      id: target.id,
+      email: target.email,
+      username: target.username,
+      displayName: target.display_name,
+      role: target.role,
+    },
+  });
+});
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -137,7 +245,7 @@ router.delete("/:userId/suspend", async (req, res) => {
         suspendedAt: null,
         suspensionReason: null,
       }),
-    ],
+    ]
   );
 
   res.json({
@@ -203,6 +311,121 @@ router.post("/:userId/restore", async (req, res) => {
   );
 
   res.json({ message: "User account has been restored." });
+});
+
+// ── Cohort / Segmentation ─────────────────────────────────────────────────────
+
+const CohortFilterSchema = z.object({
+  signup_source: z.enum(["referral", "organic"]).optional(),
+  league: z.enum(["bronze", "silver", "gold"]).optional(),
+  status: z.enum(["active", "suspended"]).optional(),
+  min_fraud_flags: z.coerce.number().int().min(0).optional(),
+  max_fraud_flags: z.coerce.number().int().min(0).optional(),
+  min_total_earned_usdc: z.coerce.number().min(0).optional(),
+  active_within_days: z.coerce.number().int().min(1).max(365).optional(),
+  created_after: z.string().datetime({ offset: true }).optional(),
+  created_before: z.string().datetime({ offset: true }).optional(),
+});
+
+const CohortQuerySchema = CursorQuerySchema.merge(CohortFilterSchema);
+
+/**
+ * GET /admin/users/cohort
+ * Return a paginated list of users matching the given filter criteria.
+ * All filter parameters are optional and ANDed together.
+ *
+ * Query params (all optional):
+ *   signup_source       "referral" | "organic"
+ *   league              "bronze" | "silver" | "gold"
+ *   status              "active" | "suspended"
+ *   min_fraud_flags     integer ≥ 0
+ *   max_fraud_flags     integer ≥ 0
+ *   min_total_earned_usdc  number ≥ 0
+ *   active_within_days  1–365
+ *   created_after       ISO 8601
+ *   created_before      ISO 8601
+ *   limit               1–500 (default 20)
+ *   cursor              opaque pagination token
+ *
+ * Restricted to admin role.
+ */
+router.get("/cohort", async (req, res) => {
+  const parsed = CohortQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw createError("Invalid query parameters", 400, "INVALID_QUERY");
+  }
+
+  const { limit, cursor, ...filterRaw } = parsed.data;
+  const filter = filterRaw as CohortFilter;
+  const effectiveLimit = Math.min(limit, COHORT_MAX_LIMIT);
+
+  const { users, total, nextCursor } = await getCohortUsers(filter, {
+    limit: effectiveLimit,
+    cursor,
+  });
+
+  res.json({ users, total, nextCursor });
+});
+
+// CSV column order
+const CSV_COLUMNS: Array<{
+  key: keyof import("../../db/queries/cohort").CohortUser;
+  label: string;
+}> = [
+  { key: "id", label: "id" },
+  { key: "email", label: "email" },
+  { key: "display_name", label: "display_name" },
+  { key: "username", label: "username" },
+  { key: "role", label: "role" },
+  { key: "status", label: "status" },
+  { key: "league", label: "league" },
+  { key: "total_score", label: "total_score" },
+  { key: "total_earned_usdc", label: "total_earned_usdc" },
+  { key: "challenges_played", label: "challenges_played" },
+  { key: "streak", label: "streak" },
+  { key: "last_active_at", label: "last_active_at" },
+  { key: "created_at", label: "created_at" },
+  { key: "referral_code", label: "referral_code" },
+  { key: "fraud_flag_count", label: "fraud_flag_count" },
+];
+
+function escapeCsvField(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const str = String(value);
+  // Wrap in quotes if field contains comma, double-quote, or newline
+  if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * GET /admin/users/cohort/export
+ * Export all matching cohort users as a CSV file (up to 10 000 rows).
+ * Accepts the same filter params as GET /admin/users/cohort.
+ * Returns Content-Disposition: attachment; filename="cohort-export.csv".
+ *
+ * Restricted to admin role.
+ */
+router.get("/cohort/export", async (req, res) => {
+  const parsed = CohortFilterSchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw createError("Invalid query parameters", 400, "INVALID_QUERY");
+  }
+
+  const filter = parsed.data as CohortFilter;
+  const users = await getCohortUsersForExport(filter);
+
+  const headerRow = CSV_COLUMNS.map((c) => c.label).join(",");
+  const dataRows = users.map((u) => CSV_COLUMNS.map((c) => escapeCsvField(u[c.key])).join(","));
+  const csv = [headerRow, ...dataRows].join("\n");
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="cohort-export-${new Date().toISOString().slice(0, 10)}.csv"`
+  );
+  res.send(csv);
 });
 
 export default router;
