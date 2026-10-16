@@ -13,6 +13,10 @@ import { BadgeGrid, type Badge as UserBadge } from "@/components/gamification/ba
 import { OfflineBanner } from "@/components/layout/offline-banner";
 import type { Metadata } from "next";
 import { ProfileActions } from "./profile-actions";
+import {
+  PinnedBadgesShowcase,
+  type BadgeItem,
+} from "@/components/gamification/pinned-badges-showcase";
 
 interface ProfilePageProps {
   params: Promise<{ username: string }>;
@@ -82,6 +86,8 @@ interface PublicProfile {
   accuracyPct: number;
   league: PublicProfileLeague | null;
   badges: PublicProfileBadge[];
+  pinnedBadges?: string[];
+  pinnedBadgeDetails?: PublicProfileBadge[];
 }
 
 async function getUserProfile(username: string): Promise<{
@@ -328,7 +334,7 @@ export default async function ProfilePage({ params }: ProfilePageProps) {
           </Card>
         )}
 
-        {isOwner && (
+        {user.isOwner && (
           <p className="mb-8 text-xs text-[var(--muted-foreground)]">
             <Link
               href="/docs/guides/streaks-explained"
@@ -357,6 +363,18 @@ export default async function ProfilePage({ params }: ProfilePageProps) {
             </Card>
           ))}
         </div>
+
+        {/* Pinned Badges Showcase (#1001) */}
+        <PinnedBadgesShowcase
+          initialPinnedBadges={
+            publicProfile?.pinnedBadgeDetails && publicProfile.pinnedBadgeDetails.length > 0
+              ? publicProfile.pinnedBadgeDetails
+              : badges.filter((b) => (publicProfile?.pinnedBadges ?? []).includes(b.slug))
+          }
+          allEarnedBadges={badges}
+          isOwner={Boolean(user.isOwner)}
+          username={user.username}
+        />
 
         {/* Badges */}
         {badges.length > 0 && (
