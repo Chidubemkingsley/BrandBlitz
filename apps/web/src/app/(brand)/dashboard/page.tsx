@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { createApiClient } from "@/lib/api";
+import { LeagueScoringPanel } from "./league-scoring-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -434,6 +435,9 @@ export default function DashboardPage() {
                   </div>
                 </div>
               </CardHeader>
+              <CardContent>
+                <LeagueScoringPanel brandId={brand.id} apiToken={apiToken} />
+              </CardContent>
               {brand.challenges.length === 0 ? (
                 <CardContent>
                   <EmptyState

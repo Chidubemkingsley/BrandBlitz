@@ -207,6 +207,21 @@ export const challengeStartLimiter = rateLimit({
   },
 });
 
+/** User reports are deliberately much tighter than normal API traffic. */
+export const reportLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  keyGenerator: userAwareKey,
+  passOnStoreError: true,
+  store: redisStore,
+  handler: (req, res) => {
+    record429("reportLimiter", userAwareKey(req));
+    res.status(429).json({ error: "Too many reports, please try again later" });
+  },
+});
+
 /**
  * Upload presign: 20 req / hour per user/IP.
  */

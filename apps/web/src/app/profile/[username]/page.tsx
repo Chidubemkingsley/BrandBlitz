@@ -15,6 +15,7 @@ import {
 } from "@/components/gamification/badge-grid";
 import { OfflineBanner } from "@/components/layout/offline-banner";
 import type { Metadata } from "next";
+import { ProfileActions } from "./profile-actions";
 
 interface ProfilePageProps {
   params: Promise<{ username: string }>;
@@ -74,6 +75,7 @@ interface PublicProfileLeague {
 }
 
 interface PublicProfile {
+  userId: string;
   username: string;
   displayName: string;
   avatarUrl: string | null;
@@ -233,6 +235,7 @@ export default async function ProfilePage({ params }: ProfilePageProps) {
             </p>
           )}
         </div>
+        {!user.isOwner && publicProfile?.userId && <ProfileActions userId={publicProfile.userId} />}
         {user.isOwner && (
           <div className="flex gap-2">
             <Link href={`/profile/${user.username}/earnings`}>
