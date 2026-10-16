@@ -33,6 +33,7 @@ import { CursorQuerySchema } from "../db/pagination";
 import { signAccessToken } from "../lib/tokens";
 import { tokenRevocationKey, tokenTtlSeconds } from "../middleware/authenticate";
 import { logger } from "../lib/logger";
+import { handleUpdatePinnedBadges } from "./badges";
 
 const router: Router = Router();
 
@@ -92,12 +93,20 @@ router.get("/me", authenticate, async (req, res) => {
     streak_repairs_this_month: user.streak_repairs_this_month,
     streak_repair_available: user.streak_repair_available,
     onboarding_completed: user.onboarding_completed,
+    pinned_badges: (user as any).pinned_badges ?? [],
+    pinnedBadges: (user as any).pinned_badges ?? [],
     created_at: user.created_at,
     updated_at: user.updated_at,
   };
 
   res.json({ user: safeUser });
 });
+
+/**
+ * PATCH /users/me/pinned-badges
+ * Pin up to 3 earned badges to public profile (#1001).
+ */
+router.patch("/me/pinned-badges", authenticate, handleUpdatePinnedBadges);
 
 /**
  * GET /users/me/api-keys
@@ -478,8 +487,9 @@ router.get("/:username/public", apiLimiter, async (req, res) => {
     league: "bronze" | "silver" | "gold" | null;
     status: string;
     deleted_at: string | null;
+    pinned_badges?: string[] | null;
   }>(
-    `SELECT id, username, display_name, avatar_url, created_at, league, status, deleted_at
+    `SELECT id, username, display_name, avatar_url, created_at, league, status, deleted_at, pinned_badges
      FROM users
      WHERE username = $1
      LIMIT 1`,
@@ -574,6 +584,16 @@ router.get("/:username/public", apiLimiter, async (req, res) => {
     };
   });
 
+  const pinnedBadgeDetails = (user.pinned_badges ?? []).map((slug) => {
+    const def = defMap.get(slug);
+    return {
+      slug,
+      name: def?.name ?? slug,
+      description: def?.description ?? "",
+      iconUrl: def?.iconUrl ?? null,
+    };
+  });
+
   res.json({
     userId: user.id,
     username: user.username,
@@ -585,6 +605,9 @@ router.get("/:username/public", apiLimiter, async (req, res) => {
     accuracyPct,
     league,
     badges,
+    pinnedBadges: user.pinned_badges ?? [],
+    pinned_badges: user.pinned_badges ?? [],
+    pinnedBadgeDetails,
   });
 });
 

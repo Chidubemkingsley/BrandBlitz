@@ -31,6 +31,13 @@ import { config } from "../lib/config";
 import { CursorQuerySchema } from "../db/pagination";
 import { query, pool } from "../db/index";
 import { getAllTags } from "../db/queries/challenge-tags";
+import {
+  createChallengeTeam,
+  joinChallengeTeam,
+  leaveChallengeTeam,
+  getChallengeTeams,
+  getUserChallengeTeam,
+} from "../db/queries/challenge-teams";
 
 const router = Router();
 const CHALLENGE_DETAIL_CACHE_TTL_SECONDS = 60;
@@ -99,7 +106,10 @@ router.get("/", optionalAuth, async (req, res) => {
   // Emit deprecation header if legacy offset is used
   if (offset !== undefined) {
     res.setHeader("Deprecation", "offset");
-    res.setHeader("Link", '<https://docs.api.brandblitz.com/pagination>; rel="deprecation"; type="text/html"');
+    res.setHeader(
+      "Link",
+      '<https://docs.api.brandblitz.com/pagination>; rel="deprecation"; type="text/html"'
+    );
   }
 
   if (brandId) {
@@ -108,7 +118,8 @@ router.get("/", optionalAuth, async (req, res) => {
     return;
   }
 
-  const hasFilters = status !== undefined || min_pool !== undefined || end_before !== undefined || tag !== undefined;
+  const hasFilters =
+    status !== undefined || min_pool !== undefined || end_before !== undefined || tag !== undefined;
 
   if (!hasFilters) {
     const cacheKey = `challenges:active:global:${cursor ?? "start"}:${limit}`;
@@ -132,7 +143,9 @@ router.get("/", optionalAuth, async (req, res) => {
   res.json({ data: challenges, nextCursor });
 });
 
-const ActiveSortSchema = z.enum(["pool_desc", "pool_asc", "newest", "ending_soon"]).default("pool_desc");
+const ActiveSortSchema = z
+  .enum(["pool_desc", "pool_asc", "newest", "ending_soon"])
+  .default("pool_desc");
 
 const ActiveQuerySchema = CursorQuerySchema.extend({
   sort: ActiveSortSchema.optional(),
@@ -154,44 +167,39 @@ const ActiveQuerySchema = CursorQuerySchema.extend({
  * Returns 200 with empty items array when no active challenges exist.
  * Requires authentication + active account (suspended users receive 403).
  */
-router.get(
-  "/active",
-  authenticate,
-  requireActiveUser,
-  async (req, res) => {
-    const parsed = ActiveQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      throw createError("Invalid query parameters", 400, "INVALID_QUERY");
-    }
+router.get("/active", authenticate, requireActiveUser, async (req, res) => {
+  const parsed = ActiveQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw createError("Invalid query parameters", 400, "INVALID_QUERY");
+  }
 
-    const { sort, cursor, limit: rawLimit } = parsed.data;
-    // Cap at 50 per the acceptance criteria
-    const limit = Math.min(rawLimit, 50);
+  const { sort, cursor, limit: rawLimit } = parsed.data;
+  // Cap at 50 per the acceptance criteria
+  const limit = Math.min(rawLimit, 50);
 
-    const { items, nextCursor } = await getActiveChallengesSorted({
-      sort: sort as ActiveChallengesSort | undefined,
-      cursor,
-      limit,
-    });
+  const { items, nextCursor } = await getActiveChallengesSorted({
+    sort: sort as ActiveChallengesSort | undefined,
+    cursor,
+    limit,
+  });
 
-    res.json({
-      items: items.map((c) => ({
-        id: c.id,
-        brand_id: c.brand_id,
-        title: c.title,
-        reward_pool_xlm: c.pool_amount_usdc,
-        entry_fee_xlm: null,
-        ends_at: c.ends_at,
-        participant_count: c.participant_count,
-        brand_name: c.brand_name,
-        logo_url: c.logo_url,
-        primary_color: c.primary_color,
-        secondary_color: c.secondary_color,
-      })),
-      nextCursor,
-    });
-  },
-);
+  res.json({
+    items: items.map((c) => ({
+      id: c.id,
+      brand_id: c.brand_id,
+      title: c.title,
+      reward_pool_xlm: c.pool_amount_usdc,
+      entry_fee_xlm: null,
+      ends_at: c.ends_at,
+      participant_count: c.participant_count,
+      brand_name: c.brand_name,
+      logo_url: c.logo_url,
+      primary_color: c.primary_color,
+      secondary_color: c.secondary_color,
+    })),
+    nextCursor,
+  });
+});
 
 /**
  * GET /challenges/tags
@@ -486,7 +494,10 @@ router.post("/:id/report", authenticate, requireActiveUser, reportLimiter, async
     await client.query(
       `INSERT INTO audit_log (action, entity_type, entity_id, metadata)
        VALUES ('content_report', 'challenge', $1, $2::jsonb)`,
-      [challengeId, JSON.stringify({ reporter_user_id: userId, reason: body.reason, details: body.details })]
+      [
+        challengeId,
+        JSON.stringify({ reporter_user_id: userId, reason: body.reason, details: body.details }),
+      ]
     );
 
     await client.query("COMMIT");
@@ -549,6 +560,73 @@ router.delete("/:id/template-opt-in", authenticate, async (req, res) => {
   if (!updated) throw createError("Challenge not found", 404);
 
   res.json({ challenge: updated });
+});
+
+const TeamActionSchema = z.object({
+  action: z.enum(["create", "join"]).optional(),
+  name: z.string().trim().min(1).max(50).optional(),
+  teamId: z.string().uuid().optional(),
+});
+
+/**
+ * GET /challenges/:id/teams
+ * List all teams for a challenge with member count and current user's membership.
+ */
+router.get("/:id/teams", optionalAuth, async (req, res) => {
+  const { id: challengeId } = z.object({ id: z.string().uuid() }).parse(req.params);
+  const currentUserId = req.user?.sub;
+
+  const challenge = await getChallengeByIdAny(challengeId);
+  if (!challenge) throw createError("Challenge not found", 404);
+
+  const teams = await getChallengeTeams(challengeId, currentUserId);
+  const userTeam = currentUserId ? await getUserChallengeTeam(challengeId, currentUserId) : null;
+
+  res.json({
+    teams,
+    userTeamId: userTeam?.id ?? null,
+    userTeam,
+  });
+});
+
+/**
+ * POST /challenges/:id/teams
+ * Create or join a team for a challenge (#1002).
+ */
+router.post("/:id/teams", authenticate, async (req, res) => {
+  const { id: challengeId } = z.object({ id: z.string().uuid() }).parse(req.params);
+  const body = TeamActionSchema.parse(req.body);
+
+  const challenge = await getChallengeByIdAny(challengeId);
+  if (!challenge) throw createError("Challenge not found", 404);
+
+  // If action is join or teamId is provided, join the team
+  if (body.action === "join" || (body.teamId && !body.name)) {
+    if (!body.teamId) {
+      throw createError("teamId is required to join a team", 400, "MISSING_TEAM_ID");
+    }
+    const result = await joinChallengeTeam(challengeId, body.teamId, req.user!.sub);
+    res.status(200).json({ success: true, team: result.team, membership: result.membership });
+    return;
+  }
+
+  // Otherwise, create team
+  if (!body.name) {
+    throw createError("Team name is required to create a team", 400, "MISSING_TEAM_NAME");
+  }
+
+  const team = await createChallengeTeam(challengeId, body.name, req.user!.sub);
+  res.status(201).json({ success: true, team });
+});
+
+/**
+ * DELETE /challenges/:id/teams/me
+ * Leave the current team for a challenge.
+ */
+router.delete("/:id/teams/me", authenticate, async (req, res) => {
+  const { id: challengeId } = z.object({ id: z.string().uuid() }).parse(req.params);
+  const left = await leaveChallengeTeam(challengeId, req.user!.sub);
+  res.json({ success: true, left });
 });
 
 export default router;
