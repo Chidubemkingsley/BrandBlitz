@@ -24,6 +24,7 @@ pnpm-debug.log*
 
 # Backup files
 *.bak
+package-lock.json
 
 # OS
 .DS_Store
